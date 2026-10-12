@@ -1,5 +1,12 @@
 import Groq from "groq-sdk";
 
+// Prioritize active vision models on Groq
+const MULTIMODAL_MODELS = [
+  "qwen/qwen3.8-27b",
+  "llama-3.2-90b-vision-preview",
+  "llama-3.2-11b-vision-preview",
+];
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -34,30 +41,55 @@ Company Expense Policy:
 ${policy}
 """`;
 
-    const response = await groq.chat.completions.create({
-      model: "llama-3.2-90b-vision-preview",
-      messages: [
-        {
-          role: "user",
-          content: [
+    // Try available vision models, falling back gracefully
+    let lastError: unknown = null;
+    let content = "";
+
+    for (const model of MULTIMODAL_MODELS) {
+      try {
+        const response = await groq.chat.completions.create({
+          model,
+          messages: [
             {
-              type: "text",
-              text: promptText,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: imageUrl,
-              },
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: promptText,
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: imageUrl,
+                  },
+                },
+              ],
             },
           ],
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 1024,
-    });
+          temperature: 0.1,
+          max_tokens: 800,
+        });
 
-    const content = response.choices[0]?.message?.content?.trim() || "";
+        content = response.choices[0]?.message?.content?.trim() || "";
+        if (content) break;
+      } catch (err: unknown) {
+        lastError = err;
+        const errStr = String(err);
+        // If decommissioned or model not found, try the next model
+        if (
+          errStr.includes("model_decommissioned") ||
+          errStr.includes("not found") ||
+          errStr.includes("deprecated")
+        ) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!content && lastError) {
+      throw lastError;
+    }
 
     // Clean any accidental markdown code fences from the output
     let cleanedContent = content;
@@ -71,7 +103,7 @@ ${policy}
     try {
       parsedResult = JSON.parse(cleanedContent);
     } catch {
-      // Fallback in case model included extraneous text
+      // Fallback regex in case model included extraneous text
       const jsonMatch = cleanedContent.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedResult = JSON.parse(jsonMatch[0]);
